@@ -1,0 +1,61 @@
+# NOTE: no "version:" key. Compose v2 ignores it and warns that it is obsolete.
+services:
+  api-gateway:
+    build: ./api-gateway
+    image: taskflow-api-gateway:latest
+    container_name: api-gateway
+    ports: ["5000:5000"]
+    environment:
+      TASK_SERVICE_URL: http://task-service:5001
+      USER_SERVICE_URL: http://user-service:5002
+      NOTIFICATION_SERVICE_URL: http://notification-service:5003
+    depends_on:
+      task-service: {condition: service_healthy}
+      user-service: {condition: service_healthy}
+      notification-service: {condition: service_healthy}
+    networks: [taskflow]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+  task-service:
+    build: ./task-service
+    image: taskflow-task-service:latest
+    container_name: task-service
+    ports: ["5001:5001"]
+    networks: [taskflow]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+  user-service:
+    build: ./user-service
+    image: taskflow-user-service:latest
+    container_name: user-service
+    ports: ["5002:5002"]
+    networks: [taskflow]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+  notification-service:
+    build: ./notification-service
+    image: taskflow-notification-service:latest
+    container_name: notification-service
+    ports: ["5003:5003"]
+    networks: [taskflow]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+networks:
+  taskflow:
+    driver: bridge
