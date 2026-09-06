@@ -111,19 +111,19 @@ jobs:
     needs: publish
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
+      - name: Lowercase the source repo path
+        id: srcrepo
+        run: echo "path=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
       - name: Check out the GitOps repo
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/gitops-node
+          repository: ${{ github.repository_owner }}/taskflow-gitops
           token: ${{ secrets.GITOPS_PAT }}
-      - name: Lowercase the repo path
-        id: repo
-        run: echo "path=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
       - name: Pin every deployment to this commit's images
         run: |
           set -euo pipefail
           for svc in api-gateway task-service user-service notification-service; do
-            sed -i -E "s|image: .*${svc}:.*|image: ${{ env.REGISTRY }}/${{ steps.repo.outputs.path }}/${svc}:${{ env.IMAGE_TAG }}|" "k8s/${svc}.yaml"
+            sed -i -E "s|image: .*${svc}:.*|image: ${{ env.REGISTRY }}/${{ steps.srcrepo.outputs.path }}/${svc}:${{ env.IMAGE_TAG }}|" "k8s/${svc}.yaml"
             sed -i "s|imagePullPolicy: Never|imagePullPolicy: IfNotPresent|" "k8s/${svc}.yaml"
           done
           git diff --stat
