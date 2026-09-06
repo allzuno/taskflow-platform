@@ -1,0 +1,137 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+env:
+  REGISTRY: ghcr.io
+  IMAGE_TAG: ${{ github.sha }}
+jobs:
+  build-and-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api-gateway, task-service, user-service, notification-service]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Lint Dockerfile (hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: ${{ matrix.service }}/Dockerfile
+          ignore: DL3008,DL3009
+      - name: Build image
+        run: docker build -t "${{ matrix.service }}:${{ env.IMAGE_TAG }}" ./${{ matrix.service }}
+      - name: Scan image (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ matrix.service }}:${{ env.IMAGE_TAG }}
+          format: sarif
+          output: trivy-${{ matrix.service }}.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '0'
+      - name: Upload scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-${{ matrix.service }}.sarif
+          category: ${{ matrix.service }}
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    needs: build-and-scan
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stack
+        run: docker compose up -d --build
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:5000/health >/dev/null 2>&1; then
+              echo "up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "gateway never became healthy"; docker compose ps; exit 1
+      - name: Test every service through the gateway
+        run: |
+          set -euo pipefail
+          curl -fsS http://localhost:5000/health
+          curl -fsS http://localhost:5000/api/v1/tasks
+          curl -fsS http://localhost:5000/api/v1/users/1
+          curl -fsS -X POST http://localhost:5000/api/v1/tasks \
+            -H 'Content-Type: application/json' \
+            -d '{"title":"ci-test","priority":"low"}'
+          curl -fsS http://localhost:5000/metrics | grep -q http_requests_total
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+      - name: Clean up
+        if: always()
+        run: docker compose down -v
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: [api-gateway, task-service, user-service, notification-service]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Lowercase the repo path
+        id: repo
+        run: echo "path=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.repo.outputs.path }}/${{ matrix.service }}:${{ env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/${{ steps.repo.outputs.path }}/${{ matrix.service }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  bump-gitops:
+    runs-on: ubuntu-latest
+    needs: publish
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Check out the GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/gitops-node
+          token: ${{ secrets.GITOPS_PAT }}
+      - name: Lowercase the repo path
+        id: repo
+        run: echo "path=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Pin every deployment to this commit's images
+        run: |
+          set -euo pipefail
+          for svc in api-gateway task-service user-service notification-service; do
+            sed -i -E "s|image: .*${svc}:.*|image: ${{ env.REGISTRY }}/${{ steps.repo.outputs.path }}/${svc}:${{ env.IMAGE_TAG }}|" "k8s/${svc}.yaml"
+            sed -i "s|imagePullPolicy: Never|imagePullPolicy: IfNotPresent|" "k8s/${svc}.yaml"
+          done
+          git diff --stat
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add k8s/
+          git diff --staged --quiet && echo "no change" && exit 0
+          git commit -m "chore: taskflow images -> ${{ env.IMAGE_TAG }}"
+          git push
