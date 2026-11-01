@@ -1,5 +1,5 @@
-*.tar
-*.pem
+*.swp
+*.swo
 .env
 __pycache__/
 node_modules/
